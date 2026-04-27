@@ -12,6 +12,7 @@ from logger import setup_logger
 from config import (
     BINANCE_API_KEY, BINANCE_API_SECRET,
     KRAKEN_API_KEY, KRAKEN_API_SECRET,
+    COINBASE_API_KEY, COINBASE_API_SECRET,
     PAPER_TRADING
 )
 
@@ -113,6 +114,23 @@ class ExchangeClient:
                 asks = [(float(a[0]), float(a[1])) for a in pair_data['asks']]
                 return OrderBook(
                     exchange="Kraken",
+                    symbol=symbol,
+                    timestamp=datetime.now(),
+                    bids=bids,
+                    asks=asks,
+                    best_bid=bids[0][0] if bids else 0.0,
+                    best_ask=asks[0][0] if asks else 0.0
+                )
+        elif exchange.lower() == "coinbase":
+            url = f"https://api.exchange.coinbase.com/products/{symbol}/book"
+            params = {"level": 2} # Level 2 includes aggregated top 50
+            headers = {"User-Agent": "CryptoArbBot/1.0"}
+            async with self.session.get(url, params=params, headers=headers) as resp:
+                data = await resp.json()
+                bids = [(float(b[0]), float(b[1])) for b in data['bids'][:limit]]
+                asks = [(float(a[0]), float(a[1])) for a in data['asks'][:limit]]
+                return OrderBook(
+                    exchange="Coinbase",
                     symbol=symbol,
                     timestamp=datetime.now(),
                     bids=bids,
@@ -238,6 +256,18 @@ class ExchangeClient:
                     filled_quantity=0.0, # Initial
                     timestamp=datetime.now()
                 )
+        elif exchange.lower() == "coinbase":
+            # For simulation, just return a mock
+            return OrderResult(
+                order_id=f"sim_cb_{int(time.time())}",
+                exchange="Coinbase",
+                side=side.lower(),
+                quantity=quantity,
+                price=price,
+                status="filled",
+                filled_quantity=quantity,
+                timestamp=datetime.now()
+            )
         return None
 
     async def cancel_order(self, exchange: str, symbol: str, order_id: str) -> bool:

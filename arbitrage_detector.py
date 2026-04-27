@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 from exchange_client import OrderBook
-from typing import Optional
+from typing import Optional, List, Tuple
 from config import MIN_PROFIT_MARGIN_PCT
 
 @dataclass
@@ -51,6 +51,28 @@ def compute_spread(
     # Return the most profitable one
     return max(opportunities, key=lambda x: x.profit_margin_pct)
 
+def _calculate_vwap(entries: List[Tuple[float, float]], target_qty: float) -> Tuple[float, float]:
+    """
+    Calculates the average price to fill target_qty from the order book.
+    Returns (average_price, actual_qty_attainable).
+    """
+    total_cost = 0.0
+    remaining_qty = target_qty
+    actual_qty = 0.0
+    
+    for price, qty in entries:
+        fill_qty = min(remaining_qty, qty)
+        total_cost += fill_qty * price
+        remaining_qty -= fill_qty
+        actual_qty += fill_qty
+        if remaining_qty <= 0:
+            break
+            
+    if actual_qty == 0:
+        return 0.0, 0.0
+        
+    return total_cost / actual_qty, actual_qty
+
 def _check_direction(
     buy_book: OrderBook,
     sell_book: OrderBook,
@@ -61,21 +83,20 @@ def _check_direction(
     slippage_pct: float
 ) -> Optional[ArbitrageOpportunity]:
     
-    # Apply slippage to estimated execution prices
-    buy_price = buy_book.best_ask * (1 + slippage_pct)
-    sell_price = sell_book.best_bid * (1 - slippage_pct)
+    # Calculate VWAP based on required quantity (Depth-based)
+    avg_buy_price, buy_attainable = _calculate_vwap(buy_book.asks, max_target_quantity)
+    avg_sell_price, sell_attainable = _calculate_vwap(sell_book.bids, max_target_quantity)
     
-    if sell_price <= buy_price:
-        return None
-        
-    # Determine max executable quantity based on depth at best prices
-    # For Phase 1, we just look at the top level quantity
-    qty_at_buy_ask = buy_book.asks[0][1]
-    qty_at_sell_bid = sell_book.bids[0][1]
-    
-    executable_quantity = min(max_target_quantity, qty_at_buy_ask, qty_at_sell_bid)
+    executable_quantity = min(buy_attainable, sell_attainable)
     
     if executable_quantity <= 0:
+        return None
+
+    # Apply slippage to estimated execution prices
+    buy_price = avg_buy_price * (1 + slippage_pct)
+    sell_price = avg_sell_price * (1 - slippage_pct)
+    
+    if sell_price <= buy_price:
         return None
         
     gross_profit_per_unit = sell_price - buy_price
