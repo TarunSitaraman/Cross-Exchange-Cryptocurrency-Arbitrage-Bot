@@ -1,6 +1,7 @@
 from datetime import datetime
 import json
 import os
+import tempfile
 from typing import Dict, Any
 from portfolio_manager import Portfolio
 from execution_engine import ExecutionResult
@@ -30,6 +31,9 @@ def save_bot_state(portfolio: Portfolio, primary_book: Any, secondary_book: Any 
             print(f"Error reading state file {state_file}: {e}")
             existing_state = {}
 
+    if not isinstance(existing_state, dict):
+        existing_state = {}
+
     price_history = existing_state.get("price_history", [])
     if not isinstance(price_history, list):
         price_history = []
@@ -55,8 +59,10 @@ def save_bot_state(portfolio: Portfolio, primary_book: Any, secondary_book: Any 
     if price_history:
         last = price_history[-1]
         if isinstance(last, dict):
-            if new_price_entry["binance"] == 0: new_price_entry["binance"] = _safe_float(last.get("binance", 0))
-            if new_price_entry["kraken"] == 0: new_price_entry["kraken"] = _safe_float(last.get("kraken", 0))
+            if new_price_entry["binance"] == 0:
+                new_price_entry["binance"] = _safe_float(last.get("binance", 0))
+            if new_price_entry["kraken"] == 0:
+                new_price_entry["kraken"] = _safe_float(last.get("kraken", 0))
 
     price_history.append(new_price_entry)
     price_history = price_history[-50:]
@@ -69,9 +75,12 @@ def save_bot_state(portfolio: Portfolio, primary_book: Any, secondary_book: Any 
         "last_update": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
     
-    temp_file = state_file + ".tmp"
-    with open(temp_file, "w") as f:
+    target_dir = os.path.dirname(os.path.abspath(state_file))
+
+    with tempfile.NamedTemporaryFile("w", dir=target_dir, delete=False) as f:
+        temp_path = f.name
         json.dump(state, f)
         f.flush()
         os.fsync(f.fileno())
-    os.replace(temp_file, state_file)
+
+    os.replace(temp_path, state_file)
