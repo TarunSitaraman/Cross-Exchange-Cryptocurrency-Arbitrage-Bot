@@ -24,14 +24,59 @@ class ExecutionResult:
 class ExecutionEngine:
     def __init__(self, client: ExchangeClient):
         self.client = client
+        self.failed_attempts = 0
 
     async def execute_arbitrage(self, opp: ArbitrageOpportunity) -> ExecutionResult:
         start_time = time.time()
         logger.info(f"Executing Arbitrage: Buy {opp.buy_exchange} ({opp.buy_price}), Sell {opp.sell_exchange} ({opp.sell_price}), Qty {opp.quantity}")
 
+        if self.failed_attempts >= 3:
+            logger.error("Circuit breaker triggered: Too many failed execution attempts.")
+            raise Exception("Circuit breaker triggered: Too many failed execution attempts.")
+
         # 1. Pre-flight checks
-        # TODO: Implement balance checks here if needed, but for MVP we assume pre-funded
+        buy_exchange_balances = await self.client.get_account_balance(opp.buy_exchange)
+        sell_exchange_balances = await self.client.get_account_balance(opp.sell_exchange)
+
+        # We need quote asset (e.g. USDT) on buy exchange and base asset (e.g. BTC) on sell exchange
+        # More robust parsing: check common quotes first
+        quote_asset = "USDT"
+        if opp.symbol.endswith("USDT"):
+            base_asset = opp.symbol[:-4]
+            quote_asset = "USDT"
+        elif opp.symbol.endswith("-USD"):
+            base_asset = opp.symbol[:-4]
+            quote_asset = "USD"
+        elif opp.symbol.endswith("USD"):
+            base_asset = opp.symbol[:-3]
+            quote_asset = "USD"
+        else:
+            base_asset = opp.symbol # Fallback
+
+        if base_asset == "XBT":
+            base_asset = "BTC" # Kraken specific logic
+
+        required_quote = opp.quantity * opp.buy_price
+        required_base = opp.quantity
+
+        buy_quote_balance = buy_exchange_balances.get(quote_asset, 0)
+        sell_base_balance = sell_exchange_balances.get(base_asset, 0)
         
+        if buy_quote_balance < required_quote or sell_base_balance < required_base:
+            logger.warning(f"Insufficient balances. Buy Exch {quote_asset}: {buy_quote_balance}/{required_quote}. Sell Exch {base_asset}: {sell_base_balance}/{required_base}")
+            self.failed_attempts += 1
+            return ExecutionResult(
+                opp_id=str(int(start_time)),
+                buy_order=None,
+                sell_order=None,
+                buy_filled=0,
+                sell_filled=0,
+                actual_net_profit=0,
+                execution_time_sec=time.time() - start_time,
+                status="failed",
+                notes="Insufficient balances"
+            )
+
         # 2. Simultaneous Order Placement
         try:
             buy_task = self.client.place_buy_order(
@@ -70,16 +115,53 @@ class ExecutionEngine:
         
         # Logic for status
         status = "success"
+        notes = ""
         if buy_filled == 0 and sell_filled == 0:
             status = "failed"
         elif buy_filled < opp.quantity or sell_filled < opp.quantity:
             status = "partial"
             
+        # Rollback / Hedging Logic for unhedged states
+        if buy_filled != sell_filled:
+            self.failed_attempts += 1
+            diff = abs(buy_filled - sell_filled)
+            if buy_filled > sell_filled:
+                # Unhedged long exposure, need to sell
+                logger.warning(f"Unhedged exposure ({diff} long). Attempting to rollback by selling on {opp.buy_exchange}")
+                try:
+                    # In a real bot, we would execute a market order.
+                    # If limited to LIMIT orders, use a deep order book price to guarantee fill (e.g. 5% slippage tolerance on rollback)
+                    rollback_price = opp.buy_price * 0.95
+                    await self.client.place_sell_order(opp.buy_exchange, opp.symbol, diff, rollback_price)
+                    notes = "Partial fill. Rolled back long exposure."
+                except Exception as e:
+                    logger.error(f"Failed to rollback long exposure: {e}")
+                    notes = "Partial fill. Rollback FAILED."
+            else:
+                # Unhedged short exposure, need to buy
+                logger.warning(f"Unhedged exposure ({diff} short). Attempting to rollback by buying on {opp.sell_exchange}")
+                try:
+                    # In a real bot, we would execute a market order.
+                    # If limited to LIMIT orders, use a deep order book price to guarantee fill (e.g. 5% slippage tolerance on rollback)
+                    rollback_price = opp.sell_price * 1.05
+                    await self.client.place_buy_order(opp.sell_exchange, opp.symbol, diff, rollback_price)
+                    notes = "Partial fill. Rolled back short exposure."
+                except Exception as e:
+                    logger.error(f"Failed to rollback short exposure: {e}")
+                    notes = "Partial fill. Rollback FAILED."
+
         # 4. Calculation of realized profit
         # (Actually we should use the prices from the fills, but for now we assume slippage accounted)
         realized_profit = (sell_filled * opp.sell_price) - (buy_filled * opp.buy_price)
+
+        # Get dynamic trading fees
+        buy_fees = await self.client.get_trading_fees(opp.buy_exchange)
+        sell_fees = await self.client.get_trading_fees(opp.sell_exchange)
+        buy_fee_pct = buy_fees.get("taker", 0.001)
+        sell_fee_pct = sell_fees.get("taker", 0.0026)
+
         # Subtract fees (simplified)
-        realized_profit -= (buy_filled * opp.buy_price * 0.001) + (sell_filled * opp.sell_price * 0.0026)
+        realized_profit -= (buy_filled * opp.buy_price * buy_fee_pct) + (sell_filled * opp.sell_price * sell_fee_pct)
 
         result = ExecutionResult(
             opp_id=str(int(start_time)),
@@ -90,9 +172,12 @@ class ExecutionEngine:
             actual_net_profit=realized_profit,
             execution_time_sec=time.time() - start_time,
             status=status,
-            notes=""
+            notes=notes
         )
         
+        if status == "success":
+            self.failed_attempts = max(0, self.failed_attempts - 1)
+
         logger.info(f"Execution finished with status: {status}. Profit: {realized_profit:.4f} USDT")
         return result
 
