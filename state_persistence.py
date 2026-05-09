@@ -23,26 +23,40 @@ def save_bot_state(portfolio: Portfolio, primary_book: Any, secondary_book: Any 
     existing_state = {}
     if os.path.exists(state_file):
         with open(state_file, "r") as f:
-            try: existing_state = json.load(f)
-            except: pass
+            try:
+                existing_state = json.load(f)
+            except (json.JSONDecodeError, OSError) as e:
+                # Log error and start with empty state to recover gracefully
+                print(f"Error reading state file {state_file}: {e}")
+                existing_state = {}
 
     price_history = existing_state.get("price_history", [])
+    if not isinstance(price_history, list):
+        price_history = []
     
     # Track mid-prices for the active primary/secondary books
-    p_price = (primary_book.best_bid + primary_book.best_ask) / 2 if primary_book else 0
-    s_price = (secondary_book.best_bid + secondary_book.best_ask) / 2 if secondary_book else p_price * 0.998 # Mock spread for viz if 2nd missing
+    # Ensure they are numeric
+    def _safe_float(val, default=0.0):
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return default
+
+    p_price = _safe_float(primary_book.best_bid + primary_book.best_ask) / 2 if primary_book else 0
+    s_price = _safe_float(secondary_book.best_bid + secondary_book.best_ask) / 2 if secondary_book else p_price * 0.998 # Mock spread for viz if 2nd missing
     
     new_price_entry = {
         "timestamp": datetime.now().strftime("%H:%M:%S"),
-        "binance": p_price if primary_book and primary_book.exchange == "Binance" else (s_price if secondary_book and secondary_book.exchange == "Binance" else 0),
-        "kraken": p_price if primary_book and primary_book.exchange == "Kraken" else (s_price if secondary_book and secondary_book.exchange == "Kraken" else 0)
+        "binance": p_price if primary_book and getattr(primary_book, 'exchange', '') == "Binance" else (s_price if secondary_book and getattr(secondary_book, 'exchange', '') == "Binance" else 0),
+        "kraken": p_price if primary_book and getattr(primary_book, 'exchange', '') == "Kraken" else (s_price if secondary_book and getattr(secondary_book, 'exchange', '') == "Kraken" else 0)
     }
     
     # If we have 0s, try to keep previous values for chart continuity
     if price_history:
         last = price_history[-1]
-        if new_price_entry["binance"] == 0: new_price_entry["binance"] = last["binance"]
-        if new_price_entry["kraken"] == 0: new_price_entry["kraken"] = last["kraken"]
+        if isinstance(last, dict):
+            if new_price_entry["binance"] == 0: new_price_entry["binance"] = _safe_float(last.get("binance", 0))
+            if new_price_entry["kraken"] == 0: new_price_entry["kraken"] = _safe_float(last.get("kraken", 0))
 
     price_history.append(new_price_entry)
     price_history = price_history[-50:]
@@ -55,5 +69,9 @@ def save_bot_state(portfolio: Portfolio, primary_book: Any, secondary_book: Any 
         "last_update": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
     
-    with open(state_file, "w") as f:
+    temp_file = state_file + ".tmp"
+    with open(temp_file, "w") as f:
         json.dump(state, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(temp_file, state_file)

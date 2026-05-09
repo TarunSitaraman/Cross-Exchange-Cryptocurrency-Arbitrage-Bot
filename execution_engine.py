@@ -25,7 +25,6 @@ class ExecutionEngine:
     def __init__(self, client: ExchangeClient):
         self.client = client
         self.failed_attempts = 0
-        self.precondition_failures = 0
 
     async def execute_arbitrage(self, opp: ArbitrageOpportunity) -> ExecutionResult:
         start_time = time.time()
@@ -65,8 +64,6 @@ class ExecutionEngine:
         
         if buy_quote_balance < required_quote or sell_base_balance < required_base:
             logger.warning(f"Insufficient balances. Buy Exch {quote_asset}: {buy_quote_balance}/{required_quote}. Sell Exch {base_asset}: {sell_base_balance}/{required_base}")
-            self.precondition_failures += 1
-            logger.info(f"Precondition failure count: {self.precondition_failures}")
             return ExecutionResult(
                 opp_id=str(int(start_time)),
                 buy_order=None,
@@ -127,28 +124,46 @@ class ExecutionEngine:
         if buy_filled != sell_filled:
             self.failed_attempts += 1
             diff = abs(buy_filled - sell_filled)
+            import aiohttp
+
+            async def execute_and_poll(exchange, symbol, qty, price, side):
+                try:
+                    if side == "sell":
+                        order = await self.client.place_sell_order(exchange, symbol, qty, price)
+                    else:
+                        order = await self.client.place_buy_order(exchange, symbol, qty, price)
+
+                    if not order or not order.order_id:
+                        return False
+
+                    # Poll for up to 10 seconds
+                    for _ in range(10):
+                        await asyncio.sleep(1)
+                        status = await self.client.get_order_status(exchange, symbol, order.order_id)
+                        if status and status.status == "filled":
+                            return True
+                        if status and status.status in ["cancelled", "rejected"]:
+                            return False
+
+                    # Timeout reached
+                    await self.client.cancel_order(exchange, symbol, order.order_id)
+                    return False
+                except aiohttp.ClientError as e:
+                    logger.error(f"Rollback client error: {e}")
+                    return False
+
             if buy_filled > sell_filled:
                 # Unhedged long exposure, need to sell
                 logger.warning(f"Unhedged exposure ({diff} long). Attempting to rollback by selling on {opp.buy_exchange}")
-                notes = await self._execute_rollback(
-                    exchange=opp.buy_exchange,
-                    symbol=opp.symbol,
-                    quantity=diff,
-                    side="sell",
-                    reference_price=opp.buy_price,
-                    slippage_factor=0.95
-                )
+                rollback_price = opp.buy_price * 0.95
+                success = await execute_and_poll(opp.buy_exchange, opp.symbol, diff, rollback_price, "sell")
+                notes = "Partial fill. Rolled back long exposure." if success else "Partial fill. Rollback FAILED."
             else:
                 # Unhedged short exposure, need to buy
                 logger.warning(f"Unhedged exposure ({diff} short). Attempting to rollback by buying on {opp.sell_exchange}")
-                notes = await self._execute_rollback(
-                    exchange=opp.sell_exchange,
-                    symbol=opp.symbol,
-                    quantity=diff,
-                    side="buy",
-                    reference_price=opp.sell_price,
-                    slippage_factor=1.05
-                )
+                rollback_price = opp.sell_price * 1.05
+                success = await execute_and_poll(opp.sell_exchange, opp.symbol, diff, rollback_price, "buy")
+                notes = "Partial fill. Rolled back short exposure." if success else "Partial fill. Rollback FAILED."
 
         # 4. Calculation of realized profit
         # (Actually we should use the prices from the fills, but for now we assume slippage accounted)
@@ -157,8 +172,13 @@ class ExecutionEngine:
         # Get dynamic trading fees
         buy_fees = await self.client.get_trading_fees(opp.buy_exchange)
         sell_fees = await self.client.get_trading_fees(opp.sell_exchange)
-        buy_fee_pct = buy_fees.get("taker", 0.001)
-        sell_fee_pct = sell_fees.get("taker", 0.0026)
+
+        from config import EXCHANGE_FEES
+        default_buy_fee = EXCHANGE_FEES.get(opp.buy_exchange, {}).get("taker", 0.001)
+        default_sell_fee = EXCHANGE_FEES.get(opp.sell_exchange, {}).get("taker", 0.0026)
+
+        buy_fee_pct = buy_fees.get("taker", default_buy_fee)
+        sell_fee_pct = sell_fees.get("taker", default_sell_fee)
 
         # Subtract fees (simplified)
         realized_profit -= (buy_filled * opp.buy_price * buy_fee_pct) + (sell_filled * opp.sell_price * sell_fee_pct)
@@ -176,106 +196,10 @@ class ExecutionEngine:
         )
         
         if status == "success":
-            self.failed_attempts = max(0, self.failed_attempts - 1)
+            self.failed_attempts = 0 # Fully reset failures on a completely successful trade
 
         logger.info(f"Execution finished with status: {status}. Profit: {realized_profit:.4f} USDT")
         return result
-
-    async def _execute_rollback(
-        self,
-        exchange: str,
-        symbol: str,
-        quantity: float,
-        side: str,
-        reference_price: float,
-        slippage_factor: float
-    ) -> str:
-        """
-        Execute a rollback order with status polling and timeout handling.
-
-        Args:
-            exchange: Exchange to execute on
-            symbol: Trading symbol
-            quantity: Quantity to rollback
-            side: 'buy' or 'sell'
-            reference_price: Reference price for the order
-            slippage_factor: Price adjustment factor (0.95 for sell, 1.05 for buy)
-
-        Returns:
-            Status message string
-        """
-        rollback_price = reference_price * slippage_factor
-        rollback_order = None
-
-        try:
-            # Place the rollback order
-            if side == "sell":
-                rollback_order = await self.client.place_sell_order(exchange, symbol, quantity, rollback_price)
-            else:
-                rollback_order = await self.client.place_buy_order(exchange, symbol, quantity, rollback_price)
-
-            if not rollback_order or not rollback_order.order_id:
-                logger.error("Rollback order placement returned no order ID")
-                return "Partial fill. Rollback order placement FAILED."
-
-            logger.info(f"Rollback order placed: {rollback_order.order_id}")
-
-            # Poll order status with timeout
-            timeout_sec = 10
-            poll_interval_sec = 1
-            elapsed = 0
-
-            while elapsed < timeout_sec:
-                await asyncio.sleep(poll_interval_sec)
-                elapsed += poll_interval_sec
-
-                try:
-                    status_result = await self.client.get_order_status(exchange, symbol, rollback_order.order_id)
-
-                    if status_result.status == "filled":
-                        logger.info(f"Rollback order {rollback_order.order_id} filled successfully")
-                        return f"Partial fill. Rolled back {side} exposure successfully."
-                    elif status_result.status in ["cancelled", "rejected"]:
-                        logger.error(f"Rollback order {rollback_order.order_id} was {status_result.status}")
-                        return f"Partial fill. Rollback {status_result.status}."
-                    elif status_result.status == "partially_filled":
-                        logger.warning(f"Rollback order {rollback_order.order_id} partially filled: {status_result.filled_quantity}/{quantity}")
-                        # Continue polling
-
-                except ValueError as e:
-                    # Exchange not supported or other validation error
-                    logger.error(f"Rollback status check failed with ValueError: {e}")
-                    return f"Partial fill. Rollback status check FAILED: {e}"
-                except Exception as e:
-                    # API errors during status check
-                    logger.error(f"Rollback status check failed: {e}")
-                    # Continue polling in case it's a transient error
-
-            # Timeout reached - cancel the order
-            logger.warning(f"Rollback order {rollback_order.order_id} timed out after {timeout_sec}s")
-            try:
-                cancel_success = await self.client.cancel_order(exchange, symbol, rollback_order.order_id)
-                if cancel_success:
-                    logger.info(f"Rollback order {rollback_order.order_id} cancelled successfully")
-                    return "Partial fill. Rollback timed out and cancelled."
-                else:
-                    logger.error(f"Failed to cancel rollback order {rollback_order.order_id}")
-                    return "Partial fill. Rollback timed out, cancel FAILED."
-            except ValueError as e:
-                logger.error(f"Rollback cancel failed with ValueError: {e}")
-                return f"Partial fill. Rollback cancel FAILED: {e}"
-            except Exception as e:
-                logger.error(f"Rollback cancel failed: {e}")
-                return f"Partial fill. Rollback cancel FAILED: {e}"
-
-        except ValueError as e:
-            # Exchange not supported or validation errors
-            logger.error(f"Rollback order placement failed with ValueError: {e}")
-            return f"Partial fill. Rollback FAILED: {e}"
-        except Exception as e:
-            # Re-raise unexpected errors instead of swallowing them
-            logger.error(f"Unexpected error during rollback: {e}")
-            raise
 
 async def test_execution():
     from exchange_client import ExchangeClient
