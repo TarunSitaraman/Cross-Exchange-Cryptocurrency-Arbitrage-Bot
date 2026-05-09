@@ -270,6 +270,79 @@ class ExchangeClient:
             )
         return None
 
+    async def get_order_status(self, exchange: str, symbol: str, order_id: str) -> OrderResult:
+        """Poll order status from exchange."""
+        if PAPER_TRADING:
+            # In paper trading, assume filled
+            return OrderResult(
+                order_id=order_id,
+                exchange=exchange,
+                side="unknown",
+                quantity=0.0,
+                price=0.0,
+                status="filled",
+                filled_quantity=0.0,
+                timestamp=datetime.now()
+            )
+
+        if exchange.lower() == "binance":
+            url = f"{self.binance_base_url}/api/v3/order"
+            params = {
+                "symbol": symbol,
+                "orderId": order_id,
+                "timestamp": int(time.time() * 1000)
+            }
+            params["signature"] = self._get_binance_signature(params)
+            headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
+            async with self.session.get(url, params=params, headers=headers) as resp:
+                data = await resp.json()
+                return OrderResult(
+                    order_id=str(data.get('orderId')),
+                    exchange="Binance",
+                    side=data.get('side', 'unknown').lower(),
+                    quantity=float(data.get('origQty', 0)),
+                    price=float(data.get('price', 0)),
+                    status=data.get('status', 'unknown').lower(),
+                    filled_quantity=float(data.get('executedQty', 0)),
+                    timestamp=datetime.now()
+                )
+        elif exchange.lower() == "kraken":
+            urlpath = "/0/private/QueryOrders"
+            url = f"{self.kraken_base_url}{urlpath}"
+            data = {
+                "nonce": int(time.time() * 1000),
+                "txid": order_id
+            }
+            headers = {
+                "API-Key": KRAKEN_API_KEY,
+                "API-Sign": self._get_kraken_signature(urlpath, data)
+            }
+            async with self.session.post(url, data=data, headers=headers) as resp:
+                data = await resp.json()
+                if data.get('error'):
+                    raise Exception(f"Kraken order status error: {data['error']}")
+                order_info = list(data['result'].values())[0]
+                status_map = {
+                    'open': 'open',
+                    'closed': 'filled',
+                    'canceled': 'cancelled',
+                    'expired': 'cancelled'
+                }
+                kraken_status = order_info.get('status', 'unknown')
+                filled_qty = float(order_info.get('vol_exec', 0))
+                return OrderResult(
+                    order_id=order_id,
+                    exchange="Kraken",
+                    side=order_info.get('descr', {}).get('type', 'unknown'),
+                    quantity=float(order_info.get('vol', 0)),
+                    price=float(order_info.get('descr', {}).get('price', 0)),
+                    status=status_map.get(kraken_status, 'unknown'),
+                    filled_quantity=filled_qty,
+                    timestamp=datetime.now()
+                )
+        else:
+            raise ValueError(f"Unsupported exchange for get_order_status: {exchange}")
+
     async def cancel_order(self, exchange: str, symbol: str, order_id: str) -> bool:
         if PAPER_TRADING:
             return True
