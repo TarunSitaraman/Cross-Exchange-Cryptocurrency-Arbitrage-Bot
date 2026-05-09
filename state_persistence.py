@@ -22,13 +22,13 @@ def save_bot_state(portfolio: Portfolio, primary_book: Any, secondary_book: Any 
 
     existing_state = {}
     if os.path.exists(state_file):
-        with open(state_file, "r") as f:
-            try:
+        try:
+            with open(state_file, "r") as f:
                 existing_state = json.load(f)
-            except (json.JSONDecodeError, OSError) as e:
-                # Log error and start with empty state to recover gracefully
-                print(f"Error reading state file {state_file}: {e}")
-                existing_state = {}
+        except (json.JSONDecodeError, OSError) as e:
+            # Log error and start with empty state to recover gracefully
+            print(f"Error reading state file {state_file}: {e}")
+            existing_state = {}
 
     price_history = existing_state.get("price_history", [])
     if not isinstance(price_history, list):
@@ -42,8 +42,8 @@ def save_bot_state(portfolio: Portfolio, primary_book: Any, secondary_book: Any 
         except (TypeError, ValueError):
             return default
 
-    p_price = _safe_float(primary_book.best_bid + primary_book.best_ask) / 2 if primary_book else 0
-    s_price = _safe_float(secondary_book.best_bid + secondary_book.best_ask) / 2 if secondary_book else p_price * 0.998 # Mock spread for viz if 2nd missing
+    p_price = (_safe_float(primary_book.best_bid) + _safe_float(primary_book.best_ask)) / 2 if primary_book else 0
+    s_price = (_safe_float(secondary_book.best_bid) + _safe_float(secondary_book.best_ask)) / 2 if secondary_book else p_price * 0.998 # Mock spread for viz if 2nd missing
     
     new_price_entry = {
         "timestamp": datetime.now().strftime("%H:%M:%S"),

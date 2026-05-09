@@ -82,6 +82,14 @@ class ExchangeClient:
         )
         return base64.b64encode(signature.digest()).decode()
 
+    def _normalize_order_status(self, status: str) -> str:
+        s = status.lower()
+        if s == "canceled":
+            return "cancelled"
+        if s == "closed":
+            return "filled"
+        return s
+
     async def get_order_book(self, exchange: str, symbol: str, limit: int = 20) -> OrderBook:
         if exchange.lower() == "binance":
             url = f"{self.binance_base_url}/api/v3/depth"
@@ -217,7 +225,7 @@ class ExchangeClient:
                     side=side.lower(),
                     quantity=float(data.get('origQty', 0)),
                     price=float(data.get('price', 0)),
-                    status=data.get('status', 'rejected').lower(),
+                    status=self._normalize_order_status(data.get('status', 'rejected')),
                     filled_quantity=float(data.get('executedQty', 0)),
                     timestamp=datetime.now()
                 )
@@ -301,7 +309,7 @@ class ExchangeClient:
                     side=data.get('side', '').lower(),
                     quantity=float(data.get('origQty', 0)),
                     price=float(data.get('price', 0)),
-                    status=data.get('status', 'rejected').lower(),
+                    status=self._normalize_order_status(data.get('status', 'rejected')),
                     filled_quantity=float(data.get('executedQty', 0)),
                     timestamp=datetime.now()
                 )
@@ -323,9 +331,7 @@ class ExchangeClient:
                     return None
 
                 order_data = data['result'][order_id]
-                status = order_data['status']
-                if status == "closed": status = "filled"
-                if status == "canceled": status = "cancelled"
+                status = self._normalize_order_status(order_data['status'])
 
                 return OrderResult(
                     order_id=order_id,

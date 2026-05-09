@@ -40,7 +40,7 @@ class ExecutionEngine:
 
         # We need quote asset (e.g. USDT) on buy exchange and base asset (e.g. BTC) on sell exchange
         # More robust parsing: check common quotes first
-        quote_asset = "USDT"
+        quote_asset = None
         if opp.symbol.endswith("USDT"):
             base_asset = opp.symbol[:-4]
             quote_asset = "USDT"
@@ -52,16 +52,31 @@ class ExecutionEngine:
             quote_asset = "USD"
         else:
             base_asset = opp.symbol # Fallback
+            quote_asset = None
 
         if base_asset == "XBT":
             base_asset = "BTC" # Kraken specific logic
+
+        if quote_asset is None:
+            logger.warning(f"Could not parse quote asset for symbol {opp.symbol}. Treating as insufficient balance to block opportunity.")
+            return ExecutionResult(
+                opp_id=str(int(start_time)),
+                buy_order=None,
+                sell_order=None,
+                buy_filled=0,
+                sell_filled=0,
+                actual_net_profit=0,
+                execution_time_sec=time.time() - start_time,
+                status="failed",
+                notes="Unknown quote asset"
+            )
 
         required_quote = opp.quantity * opp.buy_price
         required_base = opp.quantity
 
         buy_quote_balance = buy_exchange_balances.get(quote_asset, 0)
         sell_base_balance = sell_exchange_balances.get(base_asset, 0)
-        
+
         if buy_quote_balance < required_quote or sell_base_balance < required_base:
             logger.warning(f"Insufficient balances. Buy Exch {quote_asset}: {buy_quote_balance}/{required_quote}. Sell Exch {base_asset}: {sell_base_balance}/{required_base}")
             return ExecutionResult(
@@ -117,12 +132,14 @@ class ExecutionEngine:
         notes = ""
         if buy_filled == 0 and sell_filled == 0:
             status = "failed"
+            self.failed_attempts += 1
         elif buy_filled < opp.quantity or sell_filled < opp.quantity:
             status = "partial"
             
         # Rollback / Hedging Logic for unhedged states
         if buy_filled != sell_filled:
-            self.failed_attempts += 1
+            if status != "failed":
+                self.failed_attempts += 1
             diff = abs(buy_filled - sell_filled)
             import aiohttp
 
