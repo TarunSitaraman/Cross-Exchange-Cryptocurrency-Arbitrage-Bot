@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 from typing import Dict, Any
+from datetime import datetime
 from portfolio_manager import Portfolio
 from execution_engine import ExecutionResult
 
