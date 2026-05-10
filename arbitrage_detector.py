@@ -83,14 +83,19 @@ def _check_direction(
     slippage_pct: float
 ) -> Optional[ArbitrageOpportunity]:
     
-    # Calculate VWAP based on required quantity (Depth-based)
-    avg_buy_price, buy_attainable = _calculate_vwap(buy_book.asks, max_target_quantity)
-    avg_sell_price, sell_attainable = _calculate_vwap(sell_book.bids, max_target_quantity)
+    # Step 1: Find the absolute maximum quantity we can safely trade based on depth
+    # We do a preliminary check to see how much we can actually get
+    _, max_buy_qty = _calculate_vwap(buy_book.asks, max_target_quantity)
+    _, max_sell_qty = _calculate_vwap(sell_book.bids, max_target_quantity)
     
-    executable_quantity = min(buy_attainable, sell_attainable)
-    
+    executable_quantity = min(max_buy_qty, max_sell_qty)
+
     if executable_quantity <= 0:
         return None
+
+    # Step 2: Now recalculate VWAP using EXACTLY the executable_quantity
+    avg_buy_price, _ = _calculate_vwap(buy_book.asks, executable_quantity)
+    avg_sell_price, _ = _calculate_vwap(sell_book.bids, executable_quantity)
 
     # Apply slippage to estimated execution prices
     buy_price = avg_buy_price * (1 + slippage_pct)

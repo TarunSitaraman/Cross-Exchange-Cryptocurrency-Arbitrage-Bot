@@ -6,8 +6,8 @@ from arbitrage_detector import compute_spread, ArbitrageOpportunity
 from exchange_client import OrderBook
 from portfolio_manager import Portfolio, PortfolioManager
 from config import (
-    BINANCE_TAKER_FEE, KRAKEN_TAKER_FEE,
-    BINANCE_WITHDRAWAL_FEE_BTC, KRAKEN_WITHDRAWAL_FEE_BTC
+    EXCHANGE_FEES,
+    WITHDRAWAL_FEES_BTC
 )
 
 class Backtester:
@@ -67,9 +67,9 @@ class Backtester:
     def run_backtest(self, history: List[Tuple[datetime, OrderBook, OrderBook]]):
         print(f"Starting Backtest over {len(history)} snapshots...")
         
-        fees_binance = {"taker": BINANCE_TAKER_FEE}
-        fees_kraken = {"taker": KRAKEN_TAKER_FEE}
-        withdrawal_fee = max(BINANCE_WITHDRAWAL_FEE_BTC, KRAKEN_WITHDRAWAL_FEE_BTC)
+        fees_binance = EXCHANGE_FEES['Binance']
+        fees_kraken = EXCHANGE_FEES['Kraken']
+        withdrawal_fee = WITHDRAWAL_FEES_BTC
         
         for timestamp, binance_book, kraken_book in history:
             # 1. Detect

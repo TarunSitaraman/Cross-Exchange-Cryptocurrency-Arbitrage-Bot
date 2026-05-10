@@ -82,6 +82,14 @@ class ExchangeClient:
         )
         return base64.b64encode(signature.digest()).decode()
 
+    def _normalize_order_status(self, status: str) -> str:
+        s = status.lower()
+        if s == "canceled":
+            return "cancelled"
+        if s == "closed":
+            return "filled"
+        return s
+
     async def get_order_book(self, exchange: str, symbol: str, limit: int = 20) -> OrderBook:
         if exchange.lower() == "binance":
             url = f"{self.binance_base_url}/api/v3/depth"
@@ -217,7 +225,7 @@ class ExchangeClient:
                     side=side.lower(),
                     quantity=float(data.get('origQty', 0)),
                     price=float(data.get('price', 0)),
-                    status=data.get('status', 'rejected').lower(),
+                    status=self._normalize_order_status(data.get('status', 'rejected')),
                     filled_quantity=float(data.get('executedQty', 0)),
                     timestamp=datetime.now()
                 )
@@ -267,6 +275,77 @@ class ExchangeClient:
                 status="filled",
                 filled_quantity=quantity,
                 timestamp=datetime.now()
+            )
+        return None
+
+    async def get_order_status(self, exchange: str, symbol: str, order_id: str) -> OrderResult:
+        if PAPER_TRADING:
+            # Mock instant fill for paper trading
+            return OrderResult(
+                order_id=order_id,
+                exchange=exchange,
+                side="unknown",
+                quantity=0.0,
+                price=0.0,
+                status="filled",
+                filled_quantity=1.0,  # Assume full fill for simplicity in mock
+                timestamp=datetime.now()
+            )
+
+        if exchange.lower() == "binance":
+            url = f"{self.binance_base_url}/api/v3/order"
+            params = {
+                "symbol": symbol,
+                "orderId": order_id,
+                "timestamp": int(time.time() * 1000)
+            }
+            params["signature"] = self._get_binance_signature(params)
+            headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
+            async with self.session.get(url, params=params, headers=headers) as resp:
+                data = await resp.json()
+                return OrderResult(
+                    order_id=str(data.get('orderId')),
+                    exchange="Binance",
+                    side=data.get('side', '').lower(),
+                    quantity=float(data.get('origQty', 0)),
+                    price=float(data.get('price', 0)),
+                    status=self._normalize_order_status(data.get('status', 'rejected')),
+                    filled_quantity=float(data.get('executedQty', 0)),
+                    timestamp=datetime.now()
+                )
+        elif exchange.lower() == "kraken":
+            urlpath = "/0/private/QueryOrders"
+            url = f"{self.kraken_base_url}{urlpath}"
+            data = {
+                "nonce": int(time.time() * 1000),
+                "txid": order_id
+            }
+            headers = {
+                "API-Key": KRAKEN_API_KEY,
+                "API-Sign": self._get_kraken_signature(urlpath, data)
+            }
+            async with self.session.post(url, data=data, headers=headers) as resp:
+                data = await resp.json()
+                if data.get('error'):
+                    logger.error(f"Kraken get_order_status error: {data['error']}")
+                    return None
+
+                order_data = data['result'][order_id]
+                status = self._normalize_order_status(order_data['status'])
+
+                return OrderResult(
+                    order_id=order_id,
+                    exchange="Kraken",
+                    side=order_data['descr']['type'],
+                    quantity=float(order_data['vol']),
+                    price=float(order_data['descr']['price']),
+                    status=status,
+                    filled_quantity=float(order_data['vol_exec']),
+                    timestamp=datetime.now()
+                )
+        elif exchange.lower() == "coinbase":
+             return OrderResult(
+                order_id=order_id, exchange="Coinbase", side="unknown", quantity=0.0, price=0.0, status="filled", filled_quantity=1.0, timestamp=datetime.now()
             )
         return None
 
